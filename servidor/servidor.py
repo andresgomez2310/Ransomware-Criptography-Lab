@@ -5,7 +5,7 @@ import socket
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-
+from compartido.autenticacion import verificar_registro_victima
 from compartido.protocolo import (
     enviar_mensaje,
     recibir_mensaje
@@ -61,6 +61,32 @@ def procesar_registro(mensaje, identidad_servidor,
 
     if clave_victima.key_size < 2048:
         raise ValueError("La clave RSA es demasiado corta")
+    
+    # Comprobar que la victima posee su clave privada RSA
+    firma_b64 = mensaje.get("firmaV")
+
+    if not isinstance(firma_b64, str) or not firma_b64:
+        raise ValueError("Falta firma de la victima")
+
+    try:
+        firma = base64.b64decode(
+            firma_b64,
+            validate=True
+        )
+    except binascii.Error as error:
+        raise ValueError(
+            "Firma de la victima mal codificada"
+        ) from error
+
+    if not verificar_registro_victima(
+        clave_victima,
+        id_victima,
+        clave_b64,
+        firma
+    ):
+        raise ValueError(
+            "Firma de la victima invalida"
+        )
 
     if carpeta_registros is None:
         registrar_identidad(id_victima, clave_b64)

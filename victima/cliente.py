@@ -5,7 +5,7 @@ import json
 import uuid
 import base64
 import socket
-
+from compartido.autenticacion import firmar_registro_victima
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -160,6 +160,7 @@ def cargar_identidad():
     }
 
 
+
 def crear_mensaje_registro(identidad):
     clave_publica_pem = identidad[
         "clave_publica"
@@ -172,10 +173,17 @@ def crear_mensaje_registro(identidad):
         clave_publica_pem
     ).decode("ascii")
 
+    firma = firmar_registro_victima(
+        identidad["clave_privada"],
+        identidad["idV"],
+        clave_publica_base64
+    )
+
     return {
         "tipo": "registro",
         "idV": identidad["idV"],
-        "pkV": clave_publica_base64
+        "pkV": clave_publica_base64,
+        "firmaV": base64.b64encode(firma).decode("ascii")
     }
 
 
