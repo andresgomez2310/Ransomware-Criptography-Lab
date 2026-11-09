@@ -16,6 +16,11 @@ from servidor.almacenamiento import (
     registrar_identidad
 )
 
+from servidor.firmas_servidor import (
+    preparar_firmas_servidor,
+    firmar_respuesta_registro
+)
+
 
 HOST = "127.0.0.1"
 PUERTO = 5000
@@ -71,13 +76,26 @@ def procesar_registro(mensaje, identidad_servidor,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
 
-    return {
+    respuesta = {
         "tipo": "registro_ok",
         "idV": id_victima,
         "pkS": base64.b64encode(
             clave_servidor_pem
         ).decode("ascii")
     }
+
+    # Preparar las claves de firma Ed25519
+    claves_firma = preparar_firmas_servidor()
+
+    # Firmar la respuesta
+    respuesta_firmada = firmar_respuesta_registro(
+        respuesta,
+        claves_firma["privada"]
+    )
+
+   
+    return respuesta_firmada
+
 
 
 def iniciar_servidor():
