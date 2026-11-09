@@ -1,6 +1,24 @@
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.exceptions import InvalidSignature
+import json
+
+
+def datos_registro_servidor(id_victima, clave_publica_b64):
+    """Representacion canonica del registro autenticado."""
+
+    mensaje = {
+        "tipo": "registro_ok",
+        "idV": id_victima,
+        "pkS": clave_publica_b64
+    }
+
+    return json.dumps(
+        mensaje,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False
+    ).encode("utf-8")
 
 
 def generar_claves_firma():

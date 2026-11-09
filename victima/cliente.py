@@ -22,6 +22,55 @@ from compartido.protocolo import (
     recibir_mensaje
 )
 
+from compartido.firmas import (
+    verificar_firma,
+    datos_registro_servidor
+)
+
+
+def verificar_registro_firmado(
+    respuesta,
+    clave_verificacion
+):
+    """
+    Verifica una respuesta de registro firmada.
+    clave_verificacion debe conocerse previamente.
+    """
+
+    if respuesta.get("tipo") != "registro_ok":
+        raise ValueError("Respuesta de registro incorrecta")
+
+    id_victima = respuesta.get("idV")
+    clave_b64 = respuesta.get("pkS")
+    firma_b64 = respuesta.get("firmaS")
+
+    if not all(
+        isinstance(valor, str) and valor
+        for valor in (id_victima, clave_b64, firma_b64)
+    ):
+        raise ValueError("Campos de autenticacion incompletos")
+
+    firma = base64.b64decode(
+        firma_b64,
+        validate=True
+    )
+
+    datos = datos_registro_servidor(
+        id_victima,
+        clave_b64
+    )
+
+    if not verificar_firma(
+        clave_verificacion,
+        datos,
+        firma
+    ):
+        raise ValueError(
+            "Firma del servidor invalida"
+        )
+
+    return True
+
 def preparar_identidad():
     CARPETA_ESTADO.mkdir(parents=True, exist_ok=True)
 
