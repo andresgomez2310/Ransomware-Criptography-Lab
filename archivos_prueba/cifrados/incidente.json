@@ -1,0 +1,13 @@
+{
+  "idV": "92007007-e4ee-49f3-80eb-34b2989837d9",
+  "archivos": [
+    "datos.csv",
+    "documento.txt",
+    "notas.txt"
+  ],
+  "contadores": [
+    0,
+    1,
+    2
+  ]
+}
