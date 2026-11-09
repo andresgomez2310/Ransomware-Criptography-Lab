@@ -223,3 +223,93 @@ def test_rechazo_servidor_no_confiable(
             host="127.0.0.1",
             puerto=servidor_real["puerto"]
         )
+
+
+def test_rechazo_identidad_no_autorizada(
+    servidor_real
+):
+    """
+    Comprueba que el servidor TCP real rechaza
+    una identidad RSA que no figura en la lista
+    de identidades previamente autorizadas.
+    """
+
+    # Crear una identidad distinta de la autorizada.
+    identidad_desconocida = crear_identidad_prueba()
+
+    assert (
+        identidad_desconocida["idV"]
+        != servidor_real["identidad"]["idV"]
+    )
+
+    # El servidor debe rechazar el registro.
+    with pytest.raises(
+        ValueError,
+        match="El servidor no confirmo el registro"
+    ):
+        conectar_y_registrar(
+            identidad_desconocida,
+            host="127.0.0.1",
+            puerto=servidor_real["puerto"]
+        )
+
+
+def test_rechazo_suplantacion_clave_rsa(servidor_real):
+    """
+    Una identidad con ID autorizado, pero con otra
+    clave RSA, no debe poder registrarse.
+    """
+
+    identidad_autorizada = servidor_real["identidad"]
+    identidad_falsa = crear_identidad_prueba()
+
+    # Utilizar el identificador de la identidad legitima,
+    # pero conservar la clave privada RSA del tercero.
+    identidad_falsa["idV"] = identidad_autorizada["idV"]
+
+    assert (
+        identidad_falsa["clave_publica"].public_numbers()
+        != identidad_autorizada["clave_publica"].public_numbers()
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="El servidor no confirmo el registro"
+    ):
+        conectar_y_registrar(
+            identidad_falsa,
+            host="127.0.0.1",
+            puerto=servidor_real["puerto"]
+        )
+
+
+def test_rechazo_sin_lista_autorizaciones(servidor_real):
+    """
+    El servidor TCP debe rechazar nuevas solicitudes
+    si desaparece el archivo de autorizaciones.
+    """
+
+    ruta_autorizaciones = (
+        servidor_real["ruta_confiable"]
+        .parent
+        .parent
+        / "servidor"
+        / "identidades_autorizadas.json"
+    )
+
+    assert ruta_autorizaciones.exists()
+
+    # Eliminar exclusivamente el archivo temporal
+    # creado por la fixture de prueba.
+    ruta_autorizaciones.unlink()
+
+    with pytest.raises(
+        ValueError,
+        match="El servidor no confirmo el registro"
+    ):
+        conectar_y_registrar(
+            servidor_real["identidad"],
+            host="127.0.0.1",
+            puerto=servidor_real["puerto"]
+        )
+
