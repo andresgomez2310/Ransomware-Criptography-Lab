@@ -40,6 +40,13 @@ def _oaep():
 
 
 def comprobar_autorizacion(mensaje, carpeta, obligatoria=False):
+    if not obligatoria:
+        return True
+
+    ruta = Path(carpeta) / "identidades_autorizadas.json"
+    if not ruta.exists():
+        raise ValueError("No existe la lista de identidades autorizadas")
+        
     ruta = Path(carpeta) / "identidades_autorizadas.json"
     if not ruta.exists():
         if obligatoria:
