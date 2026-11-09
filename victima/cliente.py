@@ -5,13 +5,22 @@ from pathlib import Path
 import base64
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
-
+import socket
 
 CARPETA_ESTADO = Path("datos_privados/victima")
 ARCHIVO_IDENTIDAD = CARPETA_ESTADO / "identidad.json"
 ARCHIVO_PRIVADO = CARPETA_ESTADO / "privada.pem"
 ARCHIVO_PUBLICO = CARPETA_ESTADO / "publica.pem"
 
+import base64
+import socket
+
+from cryptography.hazmat.primitives import serialization
+
+from compartido.protocolo import (
+    enviar_mensaje,
+    recibir_mensaje
+)
 
 def preparar_identidad():
     CARPETA_ESTADO.mkdir(parents=True, exist_ok=True)
@@ -117,6 +126,80 @@ def crear_mensaje_registro(identidad):
         "idV": identidad["idV"],
         "pkV": clave_publica_base64
     }
+
+
+def registrar_victima(conexion, identidad):
+    """
+    Envia los datos de registro de la victima
+    y verifica la respuesta del servidor.
+    """
+
+    # 1. Preparar el mensaje
+    mensaje = crear_mensaje_registro(identidad)
+
+    # 2. Enviarlo al servidor
+    enviar_mensaje(conexion, mensaje)
+
+    # 3. Recibir la respuesta
+    respuesta = recibir_mensaje(conexion)
+
+    # 4. Comprobar que el registro fue aceptado
+    if respuesta.get("tipo") != "registro_ok":
+        raise ValueError(
+            "El servidor no confirmo el registro"
+        )
+
+    # 5. Verificar el identificador
+    if respuesta.get("idV") != identidad["idV"]:
+        raise ValueError(
+            "El identificador recibido no coincide"
+        )
+
+    # 6. Comprobar que recibimos una clave publica
+    if not isinstance(respuesta.get("pkS"), str):
+        raise ValueError(
+            "Falta la clave publica del servidor"
+        )
+
+    # 7. Convertir Base64 a bytes
+    clave_pem = base64.b64decode(
+        respuesta["pkS"],
+        validate=True
+    )
+
+    # 8. Reconstruir la clave publica
+    clave_servidor = serialization.load_pem_public_key(
+        clave_pem
+    )
+
+    return {
+        "respuesta": respuesta,
+        "clave_publica_servidor": clave_servidor
+    }
+
+def conectar_y_registrar(
+    identidad,
+    host="127.0.0.1",
+    puerto=5000
+):
+    """
+    Conecta la victima con el servidor
+    y realiza solamente el registro.
+    """
+
+    with socket.create_connection(
+        (host, puerto),
+        timeout=5
+    ) as conexion:
+
+        conexion.settimeout(5)
+
+        resultado = registrar_victima(
+            conexion,
+            identidad
+        )
+
+    return resultado
 
 if __name__ == "__main__":
     identidad = preparar_identidad()
