@@ -1,15 +1,16 @@
 
 import base64
 import binascii
+import json
 import socket
+from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+
 from compartido.autenticacion import verificar_registro_victima
-from compartido.protocolo import (
-    enviar_mensaje,
-    recibir_mensaje
-)
+from compartido.confianza import verificar_identidad_autorizada
+from compartido.protocolo import enviar_mensaje, recibir_mensaje
 
 from servidor.almacenamiento import (
     preparar_servidor,
@@ -24,11 +25,68 @@ from servidor.firmas_servidor import (
 
 HOST = "127.0.0.1"
 PUERTO = 5000
+CARPETA_SERVIDOR = Path("datos_privados/servidor")
 
 
-def procesar_registro(mensaje, identidad_servidor,
-                      carpeta_registros=None):
-    """Valida un registro y construye la respuesta."""
+def comprobar_autorizacion(mensaje, carpeta):
+    """
+    Comprueba la lista de identidades autorizadas.
+
+    Si el archivo no existe, conserva el modo
+    de registro anterior del laboratorio.
+
+    Si existe, solo permite identidades incluidas
+    con su clave RSA previamente autorizada.
+    """
+    ruta = Path(carpeta) / "identidades_autorizadas.json"
+
+    if not ruta.exists():
+        return True
+
+    try:
+        autorizaciones = json.loads(
+            ruta.read_text(encoding="utf-8")
+        )
+    except (ValueError, OSError) as error:
+        raise ValueError(
+            "No se pudo cargar la lista de autorizaciones"
+        ) from error
+
+    if not isinstance(autorizaciones, dict):
+        raise ValueError("Lista de autorizaciones invalida")
+
+    id_victima = mensaje.get("idV")
+    clave_confiable_b64 = autorizaciones.get(id_victima)
+
+    if not isinstance(clave_confiable_b64, str):
+        raise ValueError("Identidad no autorizada")
+
+    try:
+        clave_confiable_pem = base64.b64decode(
+            clave_confiable_b64,
+            validate=True
+        )
+    except (ValueError, binascii.Error) as error:
+        raise ValueError(
+            "Clave autorizada mal codificada"
+        ) from error
+
+    return verificar_identidad_autorizada(
+        mensaje,
+        id_victima,
+        clave_confiable_pem
+    )
+
+
+def procesar_registro(
+    mensaje,
+    identidad_servidor,
+    carpeta_registros=None
+):
+    """Valida un registro y devuelve respuesta firmada."""
+
+    if not isinstance(mensaje, dict):
+        raise ValueError("Mensaje invalido")
 
     if mensaje.get("tipo") != "registro":
         raise ValueError("Tipo de mensaje no admitido")
@@ -47,12 +105,14 @@ def procesar_registro(mensaje, identidad_servidor,
 
     try:
         datos_clave = base64.b64decode(
-            clave_b64, validate=True
+            clave_b64,
+            validate=True
         )
 
         clave_victima = serialization.load_pem_public_key(
             datos_clave
         )
+
     except (ValueError, binascii.Error) as error:
         raise ValueError("Clave publica invalida") from error
 
@@ -61,8 +121,8 @@ def procesar_registro(mensaje, identidad_servidor,
 
     if clave_victima.key_size < 2048:
         raise ValueError("La clave RSA es demasiado corta")
-    
-    # Comprobar que la victima posee su clave privada RSA
+
+    # 1. Comprobar la firma RSA-PSS.
     firma_b64 = mensaje.get("firmaV")
 
     if not isinstance(firma_b64, str) or not firma_b64:
@@ -73,7 +133,7 @@ def procesar_registro(mensaje, identidad_servidor,
             firma_b64,
             validate=True
         )
-    except binascii.Error as error:
+    except (ValueError, binascii.Error) as error:
         raise ValueError(
             "Firma de la victima mal codificada"
         ) from error
@@ -84,17 +144,26 @@ def procesar_registro(mensaje, identidad_servidor,
         clave_b64,
         firma
     ):
-        raise ValueError(
-            "Firma de la victima invalida"
-        )
+        raise ValueError("Firma de la victima invalida")
 
-    if carpeta_registros is None:
-        registrar_identidad(id_victima, clave_b64)
-    else:
-        registrar_identidad(
-            id_victima, clave_b64, carpeta_registros
-        )
+    # 2. Verificar la identidad contra la lista
+    # previamente autorizada, si esta configurada.
+    carpeta = (
+        Path(carpeta_registros)
+        if carpeta_registros is not None
+        else CARPETA_SERVIDOR
+    )
 
+    comprobar_autorizacion(mensaje, carpeta)
+
+    # 3. Registrar solamente despues de autenticar.
+    registrar_identidad(
+        id_victima,
+        clave_b64,
+        carpeta
+    )
+
+    # 4. Preparar la respuesta con la clave RSA del servidor.
     clave_servidor_pem = identidad_servidor[
         "publica"
     ].public_bytes(
@@ -110,25 +179,21 @@ def procesar_registro(mensaje, identidad_servidor,
         ).decode("ascii")
     }
 
-    # Preparar las claves de firma Ed25519
-    claves_firma = preparar_firmas_servidor()
+    # 5. Firmar con Ed25519 desde el mismo almacenamiento.
+    claves_firma = preparar_firmas_servidor(carpeta)
 
-    # Firmar la respuesta
-    respuesta_firmada = firmar_respuesta_registro(
+    return firmar_respuesta_registro(
         respuesta,
         claves_firma["privada"]
     )
-
-   
-    return respuesta_firmada
-
 
 
 def iniciar_servidor():
     identidad = preparar_servidor()
 
     with socket.socket(
-        socket.AF_INET, socket.SOCK_STREAM
+        socket.AF_INET,
+        socket.SOCK_STREAM
     ) as escucha:
 
         escucha.setsockopt(
@@ -144,7 +209,7 @@ def iniciar_servidor():
         print(f"Escuchando en {HOST}:{PUERTO}")
 
         while True:
-            conexion, direccion = escucha.accept()
+            conexion, _ = escucha.accept()
 
             with conexion:
                 conexion.settimeout(5)
@@ -153,7 +218,8 @@ def iniciar_servidor():
                     mensaje = recibir_mensaje(conexion)
 
                     respuesta = procesar_registro(
-                        mensaje, identidad
+                        mensaje,
+                        identidad
                     )
 
                     enviar_mensaje(conexion, respuesta)
@@ -172,10 +238,13 @@ def iniciar_servidor():
                     print("Solicitud rechazada:", error)
 
                     try:
-                        enviar_mensaje(conexion, {
-                            "tipo": "error",
-                            "mensaje": str(error)
-                        })
+                        enviar_mensaje(
+                            conexion,
+                            {
+                                "tipo": "error",
+                                "mensaje": str(error)
+                            }
+                        )
                     except OSError:
                         pass
 
