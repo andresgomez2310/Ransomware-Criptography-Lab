@@ -1,5 +1,6 @@
 
 import base64
+import json
 import os
 import socket
 import subprocess
@@ -48,9 +49,13 @@ def servidor_real(tmp_path, monkeypatch):
     # Aislar los archivos del laboratorio.
     monkeypatch.chdir(tmp_path)
 
+    carpeta_servidor = (
+        tmp_path / "datos_privados" / "servidor"
+    )
+
     # Crear una identidad Ed25519 persistente.
     claves = preparar_firmas_servidor(
-        tmp_path / "datos_privados" / "servidor"
+        carpeta_servidor
     )
 
     carpeta_victima = (
@@ -67,6 +72,32 @@ def servidor_real(tmp_path, monkeypatch):
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
+    )
+
+    # NUEVO: crear una identidad RSA de laboratorio
+    # y autorizarla antes de arrancar el servidor.
+    identidad_autorizada = crear_identidad_prueba()
+
+    publica_pem = identidad_autorizada[
+        "clave_publica"
+    ].public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+    autorizaciones = {
+        identidad_autorizada["idV"]: base64.b64encode(
+            publica_pem
+        ).decode("ascii")
+    }
+
+    ruta_autorizaciones = (
+        carpeta_servidor / "identidades_autorizadas.json"
+    )
+
+    ruta_autorizaciones.write_text(
+        json.dumps(autorizaciones, indent=2),
+        encoding="utf-8"
     )
 
     # Arrancar el modulo REAL del servidor,
@@ -118,7 +149,8 @@ def servidor_real(tmp_path, monkeypatch):
 
         yield {
             "puerto": puerto,
-            "ruta_confiable": ruta_confiable
+            "ruta_confiable": ruta_confiable,
+            "identidad": identidad_autorizada
         }
 
     finally:
@@ -131,7 +163,8 @@ def servidor_real(tmp_path, monkeypatch):
 
 
 def test_registro_real_autenticado(servidor_real):
-    identidad = crear_identidad_prueba()
+    # Utilizar la identidad previamente autorizada.
+    identidad = servidor_real["identidad"]
 
     resultado = conectar_y_registrar(
         identidad,
@@ -153,7 +186,9 @@ def test_rechazo_servidor_no_confiable(
     servidor_real,
     monkeypatch
 ):
-    identidad = crear_identidad_prueba()
+    # Utilizar una identidad autorizada para que
+    # la prueba llegue a verificar la firma Ed25519.
+    identidad = servidor_real["identidad"]
 
     # Crear una clave de confianza DIFERENTE.
     clave_ajena = ed25519.Ed25519PrivateKey.generate()

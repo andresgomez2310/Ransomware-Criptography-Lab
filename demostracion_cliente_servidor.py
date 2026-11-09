@@ -1,4 +1,5 @@
 
+import base64
 import hashlib
 import json
 import os
@@ -27,22 +28,125 @@ def puerto_libre():
 def entorno_python():
     entorno = os.environ.copy()
     anterior = entorno.get("PYTHONPATH", "")
+
     entorno["PYTHONPATH"] = (
-        str(RAIZ) + (os.pathsep + anterior if anterior else "")
+        str(RAIZ)
+        + (os.pathsep + anterior if anterior else "")
     )
+
     return entorno
 
 
+def ejecutar_cliente(carpeta, codigo, puerto=None):
+    comando = [sys.executable, "-c", codigo]
+
+    if puerto is not None:
+        comando.append(str(puerto))
+
+    resultado = subprocess.run(
+        comando,
+        cwd=carpeta,
+        env=entorno_python(),
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False
+    )
+
+    if resultado.returncode != 0:
+        raise RuntimeError(
+            resultado.stderr or resultado.stdout
+        )
+
+    for linea in resultado.stdout.splitlines():
+        if linea.startswith("RESULTADO_JSON:"):
+            return json.loads(
+                linea.removeprefix("RESULTADO_JSON:")
+            )
+
+    raise RuntimeError(
+        "No se recibio el resultado del cliente"
+    )
+
+
+def preparar_cliente_autorizado(carpeta, servidor_dir):
+    """
+    Crea la identidad RSA ficticia en el mismo
+    almacenamiento que utilizara el cliente real.
+
+    Solo exporta su identificador y clave publica.
+    La clave privada nunca se entrega al servidor.
+    """
+
+    codigo = """
+import base64
+import json
+
+from cryptography.hazmat.primitives import serialization
+from victima.cliente import preparar_identidad
+
+identidad = preparar_identidad()
+
+publica_pem = identidad["clave_publica"].public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo
+)
+
+print("RESULTADO_JSON:" + json.dumps({
+    "idV": identidad["idV"],
+    "pkV": base64.b64encode(publica_pem).decode("ascii")
+}))
+"""
+
+    identidad = ejecutar_cliente(carpeta, codigo)
+
+    servidor_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    ruta_autorizaciones = (
+        servidor_dir / "identidades_autorizadas.json"
+    )
+
+    autorizaciones = {
+        identidad["idV"]: identidad["pkV"]
+    }
+
+    ruta_autorizaciones.write_text(
+        json.dumps(
+            autorizaciones,
+            indent=2,
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
+    )
+
+    return identidad["idV"], ruta_autorizaciones
+
+
 def iniciar_servidor(carpeta, puerto):
+    """
+    Inicia el servidor TCP real en un proceso separado.
+    """
+
     codigo = """
 from servidor import servidor
+import sys
+
 servidor.HOST = "127.0.0.1"
-servidor.PUERTO = int(__import__("sys").argv[1])
+servidor.PUERTO = int(sys.argv[1])
 servidor.iniciar_servidor()
 """
 
     proceso = subprocess.Popen(
-        [sys.executable, "-u", "-c", codigo, str(puerto)],
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            codigo,
+            str(puerto)
+        ],
         cwd=carpeta,
         env=entorno_python(),
         stdout=subprocess.DEVNULL,
@@ -65,33 +169,44 @@ servidor.iniciar_servidor()
                 timeout=0.2
             ):
                 return proceso
+
         except OSError:
             time.sleep(0.1)
 
     detener_servidor(proceso)
-    raise TimeoutError("Servidor no disponible")
+
+    raise TimeoutError(
+        "El servidor TCP no estuvo disponible"
+    )
 
 
 def detener_servidor(proceso):
     if proceso.poll() is None:
         proceso.terminate()
+
         try:
-            proceso.wait(timeout=3)
+            proceso.wait(timeout=5)
+
         except subprocess.TimeoutExpired:
             proceso.kill()
-            proceso.wait(timeout=3)
+            proceso.wait(timeout=5)
 
     if proceso.stderr:
         proceso.stderr.close()
 
 
 def registrar_cliente(carpeta, puerto):
+    """
+    Ejecuta el cliente autentico en otro proceso.
+    """
+
     codigo = """
 import hashlib
 import json
 import sys
 
 from cryptography.hazmat.primitives import serialization
+
 from victima.cliente import (
     preparar_identidad,
     conectar_y_registrar
@@ -116,31 +231,17 @@ print("RESULTADO_JSON:" + json.dumps({
     "idV": identidad["idV"],
     "registro": resultado["respuesta"]["tipo"],
     "rsa_bits": clave.key_size,
-    "huella_servidor": hashlib.sha256(pem).hexdigest()
+    "huella_servidor": hashlib.sha256(
+        pem
+    ).hexdigest()
 }))
 """
 
-    resultado = subprocess.run(
-        [sys.executable, "-c", codigo, str(puerto)],
-        cwd=carpeta,
-        env=entorno_python(),
-        capture_output=True,
-        text=True,
-        timeout=12
+    return ejecutar_cliente(
+        carpeta,
+        codigo,
+        puerto
     )
-
-    if resultado.returncode:
-        raise RuntimeError(
-            resultado.stderr or resultado.stdout
-        )
-
-    for linea in resultado.stdout.splitlines():
-        if linea.startswith("RESULTADO_JSON:"):
-            return json.loads(
-                linea.removeprefix("RESULTADO_JSON:")
-            )
-
-    raise RuntimeError("No se recibio el resultado del cliente")
 
 
 def main():
@@ -151,44 +252,87 @@ def main():
     ) as temporal:
 
         carpeta = Path(temporal)
-        servidor_dir = carpeta / "datos_privados" / "servidor"
-        victima_dir = carpeta / "datos_privados" / "victima"
 
-        victima_dir.mkdir(parents=True)
+        servidor_dir = (
+            carpeta / "datos_privados" / "servidor"
+        )
 
-        # Instalar la clave publica confiable del servidor.
-        firmas = preparar_firmas_servidor(servidor_dir)
+        victima_dir = (
+            carpeta / "datos_privados" / "victima"
+        )
 
-        clave_confiable = firmas["publica"].public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        victima_dir.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        # 1. Crear confianza previa en Ed25519.
+        firmas = preparar_firmas_servidor(
+            servidor_dir
+        )
+
+        clave_confiable = (
+            firmas["publica"].public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
         )
 
         ruta_confiable = (
             victima_dir / "servidor_confiable.pem"
         )
-        ruta_confiable.write_bytes(clave_confiable)
 
+        ruta_confiable.write_bytes(
+            clave_confiable
+        )
+
+        # 2. Preparar la autorizacion ANTES del servidor.
+        print("[1] Autorizacion previa de identidad")
+
+        id_autorizado, ruta_autorizaciones = (
+            preparar_cliente_autorizado(
+                carpeta,
+                servidor_dir
+            )
+        )
+
+        assert ruta_autorizaciones.is_file()
+
+        # 3. Arrancar el servidor real.
         puerto = puerto_libre()
 
-        # Primer inicio del servidor real.
-        proceso = iniciar_servidor(carpeta, puerto)
+        proceso = iniciar_servidor(
+            carpeta,
+            puerto
+        )
 
         try:
-            print("[1] Registro inicial")
-            primero = registrar_cliente(carpeta, puerto)
+            print("[2] Primer registro TCP")
 
-            print("[2] Segundo registro")
-            segundo = registrar_cliente(carpeta, puerto)
+            primero = registrar_cliente(
+                carpeta,
+                puerto
+            )
 
-            assert primero["idV"] == segundo["idV"]
+            assert primero["idV"] == id_autorizado
+            assert primero["registro"] == "registro_ok"
+
+            print("[3] Segundo registro TCP")
+
+            segundo = registrar_cliente(
+                carpeta,
+                puerto
+            )
+
+            assert segundo["idV"] == id_autorizado
+
             assert (
                 primero["huella_servidor"]
                 == segundo["huella_servidor"]
             )
 
-            # Simular confianza en otra clave Ed25519.
-            print("[3] Rechazo de clave no confiable")
+            # 4. Rechazar una clave Ed25519 ajena.
+            print("[4] Rechazo de servidor no confiable")
 
             clave_ajena = (
                 ed25519.Ed25519PrivateKey.generate()
@@ -199,12 +343,18 @@ def main():
                 )
             )
 
-            ruta_confiable.write_bytes(clave_ajena)
+            ruta_confiable.write_bytes(
+                clave_ajena
+            )
 
             rechazada = False
 
             try:
-                registrar_cliente(carpeta, puerto)
+                registrar_cliente(
+                    carpeta,
+                    puerto
+                )
+
             except RuntimeError as error:
                 if "Firma del servidor invalida" in str(error):
                     rechazada = True
@@ -212,44 +362,73 @@ def main():
                     raise
 
             assert rechazada, (
-                "El cliente acepto una clave no confiable"
+                "El cliente acepto una firma no confiable"
             )
 
-            ruta_confiable.write_bytes(clave_confiable)
-
         finally:
+            ruta_confiable.write_bytes(
+                clave_confiable
+            )
             detener_servidor(proceso)
 
-        # Reiniciar el programa real del servidor.
-        print("[4] Registro despues del reinicio")
+        # 5. Reiniciar completamente el servidor.
+        print("[5] Registro despues del reinicio")
 
-        proceso = iniciar_servidor(carpeta, puerto)
+        proceso = iniciar_servidor(
+            carpeta,
+            puerto
+        )
 
         try:
-            tercero = registrar_cliente(carpeta, puerto)
+            tercero = registrar_cliente(
+                carpeta,
+                puerto
+            )
+
         finally:
             detener_servidor(proceso)
 
-        assert primero["idV"] == tercero["idV"]
+        assert tercero["idV"] == id_autorizado
+        assert tercero["registro"] == "registro_ok"
+        assert tercero["rsa_bits"] >= 2048
+
         assert (
             primero["huella_servidor"]
             == tercero["huella_servidor"]
         )
 
-        assert tercero["registro"] == "registro_ok"
-        assert tercero["rsa_bits"] >= 2048
+        autorizaciones_recargadas = json.loads(
+            ruta_autorizaciones.read_text(
+                encoding="utf-8"
+            )
+        )
 
+        assert (
+            id_autorizado
+            in autorizaciones_recargadas
+        )
+
+        # 6. Informe final.
         resultado = {
             "estado": "APROBADO",
             "registro_real_tcp": True,
+            "autorizacion_previa": True,
             "identidad_persistente": True,
             "servidor_persistente": True,
             "clave_no_confiable_rechazada": rechazada,
-            "reinicio_verificado": True
+            "reinicio_verificado": True,
+            "claves_rsa_minimo_bits": tercero["rsa_bits"],
+            "archivos_temporales": True
         }
 
         print("\n=== RESULTADO FINAL ===")
-        print(json.dumps(resultado, indent=2))
+        print(
+            json.dumps(
+                resultado,
+                indent=2,
+                ensure_ascii=False
+            )
+        )
 
         return 0
 
