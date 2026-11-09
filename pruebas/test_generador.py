@@ -2,7 +2,6 @@
 from material_profesor.generador_semillas import (
     generar_semilla_maestra
 )
-from victima.cifrado import derivar_clave
 
 
 def test_longitud_semilla():
@@ -22,6 +21,7 @@ def test_rango_semilla():
 
 
 def test_compatibilidad_hmac():
+    from victima.cifrado import derivar_clave
 
     semilla = generar_semilla_maestra()
     clave = derivar_clave(semilla, 0)
